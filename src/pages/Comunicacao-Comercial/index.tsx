@@ -144,17 +144,9 @@ export default function ComunicacaoComercial() {
   }, [paginagr]);
 
   async function getComunicados() {
-    await api
-      .get('/api/Comunicado')
-      .then((response) => {
-        setLoading(false);
-        setComunicados(response.data);
-        comunicados = response.data;
-        console.log('comunicados', comunicados);
-      })
-      .catch((error) => {
-        console.log('Ocorreu um erro');
-      });
+    setLoading(false);
+    setComunicados([]);
+    comunicados = [];
   }
   async function GetListaComunicado() {
     await api

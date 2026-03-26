@@ -1110,6 +1110,8 @@ function PedidoVendas() {
 
   let [isMobile, setIsMobile] = useState(false);
   const [atualizando, setatualizando] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const verificarEnvioExecutedRef = useRef(false);
 
   useEffect(() => {
     localStorage.setItem('@Portal/sincronizar', 'true');
@@ -1125,11 +1127,11 @@ function PedidoVendas() {
     }
   }, []);
   useEffect(() => {
-    VerificarAtualizacao();
-    const intervalId = setInterval(VerificarAtualizacao, 5000);
-
-    return () => clearInterval(intervalId);
-  }, [isMobile]);
+    if (!isOnline) return;
+    if (verificarEnvioExecutedRef.current) return;
+    verificarEnvioExecutedRef.current = true;
+    VerificarPedidoEnviado();
+  }, [isOnline]);
 
   useEffect(() => {
     console.log('valores somados', moeda(valorTotalComIpi));
@@ -1139,20 +1141,120 @@ function PedidoVendas() {
     console.log('valores somados IpiEscoliho', moeda(IpiEscolhido));
   }, [IpiEscolhido]);
 
-  async function VerificarAtualizacao() {
-    await api
-      .get(`/api/Comunicado?pagina=1&totalpagina=999`)
-      .then((response) => {
-        console.log('verificar atualização', response.data.data);
-        if (response.data.data.length > 0 && usuario.username != 'admin') {
-          setatualizando(true);
-        } else {
-          setatualizando(false);
+  function chunkArray<T>(arr: T[], chunkSize: number): T[][] {
+    const out: T[][] = [];
+    for (let i = 0; i < arr.length; i += chunkSize) {
+      out.push(arr.slice(i, i + chunkSize));
+    }
+    return out;
+  }
+
+  function escapeSqlString(v: string) {
+    return String(v || '').replace(/'/g, "''");
+  }
+
+  async function isVerificarEnvioHabilitado(): Promise<boolean> {
+    try {
+      const resp = await api.get('/api/Etiqueta/1');
+      const titulo = String((resp as any)?.data?.titulo ?? '').trim();
+      const nomeTxt = String((resp as any)?.data?.nomeTxt ?? '').trim();
+      return titulo === 'Verificar Envio' && nomeTxt === 'Verificar Envio';
+    } catch {
+      return false;
+    }
+  }
+
+  async function atualizarCabecalhosLocaisEnviados(palToPedido: Map<string, string>) {
+    try {
+      const db = await openDB<PgamobileDB>('pgamobile', versao);
+      const tx = db.transaction('cabecalhoPedidoVenda', 'readwrite');
+      const store = tx.objectStore('cabecalhoPedidoVenda');
+      const allCabecalhos = await store.getAll();
+
+      for (const cab of allCabecalhos) {
+        const pal = String(cab?.palMPV || '').trim();
+        const pedido = palToPedido.get(pal);
+        const ativo = String(cab?.ativo || '').trim().toUpperCase();
+        if (
+          pedido &&
+          ativo === 'S' &&
+          cab?.vendedorId == Number(usuario.username) &&
+          String(cab?.status || '').trim() === 'Processar'
+        ) {
+          cab.status = 'Enviado';
+          cab.pedido = pedido;
+          await store.put(cab);
         }
-      })
-      .catch((error) => {
-        console.log('erro de conexao');
+      }
+
+      await tx.done;
+    } catch {}
+  }
+
+  async function VerificarPedidoEnviado() {
+    if (!isOnline) return;
+    const habilitado = await isVerificarEnvioHabilitado();
+    if (!habilitado) return;
+
+    try {
+      const resp = await api.get(
+        `/api/CabecalhoPedidoVenda/filter/status?pagina=1&totalpagina=999&codVendedor=${usuario.username}&codParceiro=${parceiroId || ''}&status=Processar`
+      );
+      const lista: ICabecalho2[] = Array.isArray((resp as any)?.data?.data)
+        ? (resp as any).data.data
+        : [];
+
+      const candidatos = lista.filter((c) => {
+        const ativo = String((c as any)?.ativo || '').trim().toUpperCase();
+        return ativo === 'S' && (c as any)?.vendedorId == Number(usuario.username);
       });
+
+      const pals = candidatos
+        .map((c) => String((c as any)?.palMPV || '').trim())
+        .filter(Boolean);
+
+      if (pals.length === 0) return;
+
+      const palToPedido = new Map<string, string>();
+      const chunks = chunkArray(pals, 40);
+
+      for (const chunk of chunks) {
+        const inList = chunk.map((p) => `'${escapeSqlString(p)}'`).join(',');
+        const sql = `SELECT PALMPV, PEDIDO FROM AD_Z38 WHERE PALMPV IN (${inList}) AND PEDIDO IS NOT NULL`;
+        const respSankhya = await api.post(
+          `/api/Sankhya/DadosDashSankhya?sql=${encodeURIComponent(sql)}`
+        );
+        const rows = (respSankhya as any)?.data?.responseBody?.rows ?? [];
+        for (const row of rows) {
+          const pal = String(row?.[0] ?? '').trim();
+          const pedido = String(row?.[1] ?? '').trim();
+          if (pal && pedido) palToPedido.set(pal, pedido);
+        }
+      }
+
+      const atualizar = candidatos.filter((cab) => {
+        const pal = String((cab as any)?.palMPV || '').trim();
+        const pedido = palToPedido.get(pal);
+        return Boolean(pedido);
+      });
+
+      for (const cab of atualizar) {
+        const pal = String((cab as any)?.palMPV || '').trim();
+        const pedido = String(palToPedido.get(pal) || '').trim();
+        if (!pedido) continue;
+        await api.put(`/api/CabecalhoPedidoVenda/${(cab as any).id}`, {
+          ...(cab as any),
+          id: (cab as any).id,
+          pedido,
+          status: 'Enviado',
+          ativo: 'S',
+        });
+      }
+
+      if (palToPedido.size > 0) {
+        await atualizarCabecalhosLocaisEnviados(palToPedido);
+      }
+    } catch {}
   }
 
   const handleKeyDown = (e: any) => {
@@ -1160,8 +1262,6 @@ function PedidoVendas() {
       apagarValor();
     }
   };
-
-  const [isOnline, setIsOnline] = useState(true);
 
   useEffect(() => {
     const valor = String(tipoNegocia ?? '');
@@ -1232,14 +1332,20 @@ function PedidoVendas() {
   }
 
   //==================get pesquisa lista cabecalho ===================================================
-  function OpemModal() {
+  async function OpemModal() {
     window.scrollTo(0, 0);
-    if (isMobile) {
-      setMobileListaTab(isOnline ? 'api' : 'local');
-    }
+    const tabInicial: 'api' | 'local' = isOnline ? 'api' : 'local';
+    setMobileListaTab(tabInicial);
     setPaginaList(1);
     paginaList = 1;
-    PesquisaTodos();
+    settodos(true);
+    setenviados(false);
+    setpendentes(false);
+    setnenviados(false);
+    setPendenteErro(false);
+    setSearchList('todos');
+    searchList = 'todos';
+    await GetListaCabecalho(tabInicial);
     setShowlistaPedidos(true);
   }
   useEffect(() => {
@@ -1254,9 +1360,8 @@ function PedidoVendas() {
     console.log('entrou na busca', searchList);
     setCabecalhoPesquisa([]);
     cabecalhoPesquisa = [];
-    const tabAtual = isMobile
-      ? (tabOverride ?? (isOnline ? 'api' : 'local'))
-      : 'api';
+    let tabAtual = tabOverride ?? mobileListaTab;
+    if (!isOnline) tabAtual = 'local';
     if (tabAtual === 'api') {
       try {
         const normalizeStatus = (v: any) =>
@@ -1265,137 +1370,39 @@ function PedidoVendas() {
             .toLowerCase()
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '');
-        const statusBusca = normalizeStatus(searchList);
-        const preferirLocal =
-          statusBusca === 'todos' ||
-          statusBusca === 'pendente' ||
-          statusBusca === 'nao enviado';
-
-        const response = await api.get(
-          `/api/CabecalhoPedidoVenda/filter/status?pagina=${paginaList}&totalpagina=${qtdePaginaList}&codVendedor=${usuario.username}&codParceiro=${parceiroId || ''}&status=${searchList}`
-        );
-        console.log('Lista de pedidos', response.data);
-        const listaPedidosPagina: ICabecalho2[] = Array.isArray(response?.data?.data)
-          ? response.data.data
-          : [];
-        let listaPedidos: ICabecalho2[] = listaPedidosPagina;
-        let listaPreferida: ICabecalho2[] = listaPedidosPagina;
-        try {
-          const db = await openDB<PgamobileDB>('pgamobile', versao);
-          const txCab = db.transaction('cabecalhoPedidoVenda', 'readwrite');
-          const storeCab = txCab.objectStore('cabecalhoPedidoVenda');
-          const todosCab = await storeCab.getAll();
-
-          const vendedorId = Number(usuario.username);
-          const parceiroFiltroAtivo = Number(parceiroId) > 0;
-          const locaisCandidatos = preferirLocal
-            ? (todosCab as any[]).filter((cabLocal: any) => {
-                const pal = String(cabLocal?.palMPV || '');
-                if (!pal) return false;
-                if (Number(cabLocal?.vendedorId) !== vendedorId) return false;
-                if (String(cabLocal?.ativo || '') === 'N') return false;
-                if (String(cabLocal?.sincronizado || '') !== 'N') return false;
-                if (
-                  parceiroFiltroAtivo &&
-                  Number(cabLocal?.parceiroId) !== Number(parceiroId)
-                ) {
-                  return false;
-                }
-                const stLocal = normalizeStatus(cabLocal?.status);
-                if (stLocal !== 'pendente' && stLocal !== 'nao enviado') return false;
-                if (statusBusca !== 'todos' && stLocal !== statusBusca) return false;
-                return true;
-              })
-            : [];
-
-          if (preferirLocal && locaisCandidatos.length > 0) {
-            try {
-              const respAll = await api.get(
-                `/api/CabecalhoPedidoVenda/filter/status?pagina=1&totalpagina=999&codVendedor=${usuario.username}&codParceiro=${parceiroId || ''}&status=${searchList}`
-              );
-              const todosApi: ICabecalho2[] = Array.isArray(respAll?.data?.data)
-                ? respAll.data.data
-                : [];
-              if (todosApi.length > 0) {
-                listaPedidos = todosApi;
-              }
-            } catch {}
-          }
-
-          const porPal = new Map<string, ICabecalho2>();
-          for (const it of listaPedidos) {
-            porPal.set(String(it.palMPV || ''), it);
-          }
-          if (preferirLocal) {
-            for (const cabLocal of locaisCandidatos as any[]) {
-              const pal = String(cabLocal?.palMPV || '');
-              if (!pal) continue;
-              const statusApi = normalizeStatus(porPal.get(pal)?.status);
-              if (statusApi === 'processar' || statusApi === 'enviado') continue;
-              porPal.set(pal, cabLocal);
-            }
-          }
-          if (preferirLocal) {
-            for (const cabLocal of locaisCandidatos as any[]) {
-              const pal = String(cabLocal?.palMPV || '');
-              if (!pal) continue;
-              if (porPal.has(pal)) continue;
-              porPal.set(pal, cabLocal);
-            }
-          }
-          listaPreferida = Array.from(porPal.values());
-          for (const cabLocal of todosCab as any[]) {
-            const pal = String(cabLocal?.palMPV || '');
-            const api = porPal.get(pal);
-            if (!api) continue;
-            const statusApi = String(api.status || '').trim();
-            const sincronizadoAtual = String(cabLocal.sincronizado || '');
-            if (sincronizadoAtual === 'R') continue;
-            const novoSync = statusApi === 'Enviado' || statusApi === 'Processar' ? 'S' : 'N';
-            if (novoSync !== sincronizadoAtual) {
-              cabLocal.sincronizado = novoSync;
-              await storeCab.put(cabLocal);
-            }
-          }
-          await txCab.done;
-          const txItem = db.transaction('itemPedidoVenda', 'readwrite');
-          const storeItem = txItem.objectStore('itemPedidoVenda');
-          const todosItens = await storeItem.getAll();
-          for (const item of todosItens as any[]) {
-            const pal = String(item?.palMPV || '');
-            const api = porPal.get(pal);
-            if (!api) continue;
-            const statusApi = String(api.status || '').trim();
-            const sincronizadoAtual = String(item.sincronizado || '');
-            if (sincronizadoAtual === 'R') continue;
-            const novoSync = statusApi === 'Enviado' || statusApi === 'Processar' ? 'S' : 'N';
-            if (novoSync !== sincronizadoAtual) {
-              item.sincronizado = novoSync;
-              await storeItem.put(item);
-            }
-          }
-          await txItem.done;
-        } catch {}
         const getTime = (v: any) => {
           const t = Date.parse(String(v || ''));
           return Number.isNaN(t) ? 0 : t;
         };
-        const isLocal = (it: any) => String(it?.sincronizado || '') === 'N';
-        const ordenada = [...listaPreferida].sort((a: any, b: any) => {
-          const ra =
-            (isLocal(a) ? 0 : 1) * 10 +
-            (normalizeStatus(a?.status) === 'pendente' ? 0 : 1);
-          const rb =
-            (isLocal(b) ? 0 : 1) * 10 +
-            (normalizeStatus(b?.status) === 'pendente' ? 0 : 1);
-          if (ra !== rb) return ra - rb;
-          const ta = getTime(a?.data);
-          const tb = getTime(b?.data);
-          if (ta !== tb) return tb - ta;
-          return String(b?.palMPV || '').localeCompare(String(a?.palMPV || ''));
-        });
 
-        if (preferirLocal) {
+        const statusBusca = normalizeStatus(searchList);
+        if (statusBusca === 'todos') {
+          const pageSizeApi = 1000;
+          let pagina = 1;
+          let acumulados: ICabecalho2[] = [];
+
+          while (true) {
+            const response = await api.get(
+              `/api/CabecalhoPedidoVenda/filter/status?pagina=${pagina}&totalpagina=${pageSizeApi}&codVendedor=${usuario.username}&codParceiro=${parceiroId || ''}&status=${searchList}`
+            );
+            const dados: ICabecalho2[] = Array.isArray(response?.data?.data)
+              ? response.data.data
+              : [];
+            acumulados = acumulados.concat(dados);
+            if (dados.length < pageSizeApi) break;
+            pagina += 1;
+          }
+
+          const ordenada = [...acumulados].sort((a: any, b: any) => {
+            const ra = normalizeStatus(a?.status) === 'pendente' ? 0 : 1;
+            const rb = normalizeStatus(b?.status) === 'pendente' ? 0 : 1;
+            if (ra !== rb) return ra - rb;
+            const ta = getTime(a?.data);
+            const tb = getTime(b?.data);
+            if (ta !== tb) return tb - ta;
+            return String(b?.palMPV || '').localeCompare(String(a?.palMPV || ''));
+          });
+
           const startIndex = (paginaList - 1) * qtdePaginaList;
           const endIndex = startIndex + qtdePaginaList;
           const paginatedData = ordenada.slice(startIndex, endIndex);
@@ -1403,6 +1410,22 @@ function PedidoVendas() {
           setCabecalhoPesquisa(paginatedData);
           cabecalhoPesquisa = paginatedData;
         } else {
+          const response = await api.get(
+            `/api/CabecalhoPedidoVenda/filter/status?pagina=${paginaList}&totalpagina=${qtdePaginaList}&codVendedor=${usuario.username}&codParceiro=${parceiroId || ''}&status=${searchList}`
+          );
+          console.log('Lista de pedidos', response.data);
+          const listaPedidosPagina: ICabecalho2[] = Array.isArray(response?.data?.data)
+            ? response.data.data
+            : [];
+          const ordenada = [...listaPedidosPagina].sort((a: any, b: any) => {
+            const ra = normalizeStatus(a?.status) === 'pendente' ? 0 : 1;
+            const rb = normalizeStatus(b?.status) === 'pendente' ? 0 : 1;
+            if (ra !== rb) return ra - rb;
+            const ta = getTime(a?.data);
+            const tb = getTime(b?.data);
+            if (ta !== tb) return tb - ta;
+            return String(b?.palMPV || '').localeCompare(String(a?.palMPV || ''));
+          });
           setCabecalhoPesquisa(ordenada);
           cabecalhoPesquisa = ordenada;
           setTotalPaginasList(Math.ceil(response.data.total / qtdePaginaList));
@@ -1419,52 +1442,43 @@ function PedidoVendas() {
 
         const cabecalho = await store.getAll();
 
-        let totais: ICabecalho2[];
+        const normalizeStatus = (v: any) =>
+          String(v || '')
+            .trim()
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+        const getTime = (v: any) => {
+          const t = Date.parse(String(v || ''));
+          return Number.isNaN(t) ? 0 : t;
+        };
 
-        if (tabAtual === 'local') {
-          const base = cabecalho.filter(
-            (item) =>
-              item.vendedorId == Number(usuario.username) &&
-              item.ativo != 'N' &&
-              String(item.sincronizado || '') === 'N'
-          );
-          const byParceiro =
-            Number(parceiroId) > 0
-              ? base.filter((item) => item.parceiroId == Number(parceiroId))
-              : base;
-          if (searchList === 'todos') {
-            totais = byParceiro;
-          } else {
-            totais = byParceiro.filter(
-              (item) => item.status.trim() == searchList
-            );
-          }
-        } else {
-          if (searchList === 'todos') {
-            totais = cabecalho.filter(
-              (item) =>
-                item.vendedorId == Number(usuario.username) &&
-                item.parceiroId == Number(parceiroId) &&
-                item.ativo != 'N'
-            );
-          } else {
-            totais = cabecalho.filter(
-              (item) =>
-                item.vendedorId == Number(usuario.username) &&
-                item.parceiroId == Number(parceiroId) &&
-                item.status.trim() == searchList &&
-                item.ativo != 'N'
-            );
-          }
-        }
+        const base = cabecalho.filter(
+          (item) =>
+            item.vendedorId == Number(usuario.username) &&
+            item.ativo != 'N' &&
+            String(item.sincronizado || '') === 'N'
+        );
+        const byParceiro =
+          Number(parceiroId) > 0
+            ? base.filter((item) => item.parceiroId == Number(parceiroId))
+            : base;
 
-        totais.reverse();
+        const ordenada = [...byParceiro].sort((a: any, b: any) => {
+          const ra = normalizeStatus(a?.status) === 'pendente' ? 0 : 1;
+          const rb = normalizeStatus(b?.status) === 'pendente' ? 0 : 1;
+          if (ra !== rb) return ra - rb;
+          const ta = getTime(a?.data);
+          const tb = getTime(b?.data);
+          if (ta !== tb) return tb - ta;
+          return String(b?.palMPV || '').localeCompare(String(a?.palMPV || ''));
+        });
 
         const startIndex = (paginaList - 1) * qtdePaginaList;
         const endIndex = startIndex + qtdePaginaList;
-        const paginatedData = totais.slice(startIndex, endIndex);
+        const paginatedData = ordenada.slice(startIndex, endIndex);
 
-        setTotalPaginasList(Math.ceil(totais.length / qtdePaginaList));
+        setTotalPaginasList(Math.ceil(ordenada.length / qtdePaginaList));
         setCabecalhoPesquisa(paginatedData);
         cabecalhoPesquisa = paginatedData;
         setListaLoading(false);
@@ -1528,6 +1542,16 @@ function PedidoVendas() {
           mudou = true;
         }
 
+        const sincronizadoAtual = String(pedidoLocal?.sincronizado || '');
+        if (sincronizadoAtual !== 'R') {
+          const novoSincronizado =
+            statusApi === 'Processar' || statusApi === 'Enviado' ? 'S' : 'N';
+          if (novoSincronizado !== sincronizadoAtual) {
+            pedidoLocal.sincronizado = novoSincronizado;
+            mudou = true;
+          }
+        }
+
         if (Number(pedidoApi?.id) > 0 && Number(pedidoApi?.id) !== Number(pedidoLocal?.id)) {
           novoId = Number(pedidoApi.id);
         }
@@ -1551,17 +1575,39 @@ function PedidoVendas() {
       }
 
       await transaction.done;
+
+      try {
+        const txItem = db.transaction('itemPedidoVenda', 'readwrite');
+        const storeItem = txItem.objectStore('itemPedidoVenda');
+        const todosItens = await storeItem.getAll();
+        for (const item of todosItens as any[]) {
+          const pal = String(item?.palMPV || '');
+          if (!pal) continue;
+          const pedidoApi = apiByPal.get(pal);
+          if (!pedidoApi) continue;
+          const statusApi = String(pedidoApi?.status || '').trim();
+          const sincronizadoAtual = String(item?.sincronizado || '');
+          if (sincronizadoAtual === 'R') continue;
+          const novoSincronizado =
+            statusApi === 'Processar' || statusApi === 'Enviado' ? 'S' : 'N';
+          if (novoSincronizado !== sincronizadoAtual) {
+            item.sincronizado = novoSincronizado;
+            await storeItem.put(item);
+          }
+        }
+        await txItem.done;
+      } catch {}
     } catch {}
   }
   useEffect(() => {
     (async () => {
-      if (showlistaPedidos && isMobile) {
+      if (showlistaPedidos) {
         setListaLoading(true);
         try {
           if (isOnline) {
             await AtualizarPedidosLocaisPeloPalMPVDaApi();
           }
-          await GetListaCabecalho();
+          await GetListaCabecalho(isOnline ? mobileListaTab : 'local');
         } finally {
           setListaLoading(false);
         }
@@ -1800,7 +1846,7 @@ function PedidoVendas() {
       const store = transaction.objectStore('cabecalhoPedidoVenda');
       const allCabecalhos = await store.getAll();
 
-      const cabecalhosParaProcessar = [];
+      const cabecalhosParaProcessar: any[] = [];
 
       for (const pedidoProcessado of pedidosProcessados) {
         const buscaCabecalho = allCabecalhos.find(
@@ -2471,9 +2517,12 @@ function PedidoVendas() {
   const [operacaoMsg, setOperacaoMsg] = useState('');
   const [operacaoProgress, setOperacaoProgress] = useState(0);
   const [operacaoTeveErro, setOperacaoTeveErro] = useState(false);
+  const handleCancelarOperacao = () => {
+    setShowOperacao(false);
+  };
   const handleCloseOperacao = () => {
     setShowOperacao(false);
-    if (!operacaoTeveErro) {
+    if (operacaoProgress >= 100 && !operacaoTeveErro) {
       localStorage.removeItem('@Portal/PedidoEmDigitacao');
       window.location.reload();
     }
@@ -13675,7 +13724,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
     setnenviados(false);
     setSearchList('todos');
     searchList = 'todos';
-    GetListaCabecalho();
+    GetListaCabecalho(isOnline ? mobileListaTab : 'local');
   }
   function PesquisaEnviados() {
     setPaginaList(1);
@@ -13686,7 +13735,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
     setnenviados(false);
     setSearchList('Enviado');
     searchList = 'Enviado';
-    GetListaCabecalho();
+    GetListaCabecalho(isOnline ? mobileListaTab : 'local');
   }
   function PesquisaPendentes() {
     setPaginaList(1);
@@ -13697,7 +13746,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
     setnenviados(false);
     setSearchList('Processar');
     searchList = 'Processar';
-    GetListaCabecalho();
+    GetListaCabecalho(isOnline ? mobileListaTab : 'local');
   }
   function PesquisaNEnviados() {
     setPaginaList(1);
@@ -13708,7 +13757,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
     setnenviados(true);
     setSearchList('Não Enviado');
     searchList = 'Não Enviado';
-    GetListaCabecalho();
+    GetListaCabecalho(isOnline ? mobileListaTab : 'local');
   }
   const [pendenteErro, setPendenteErro] = useState(false);
   function PesquisaPendenteErro() {
@@ -13721,7 +13770,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
     setPendenteErro(true);
     setSearchList('Pendente');
     searchList = 'Pendente';
-    GetListaCabecalho();
+    GetListaCabecalho(isOnline ? mobileListaTab : 'local');
   }
   //==============================================================================================
 
@@ -14851,7 +14900,6 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
                                   className="btn btn-dark"
                                   onClick={() => {
                                     window.scrollTo(0, 0);
-                                    PesquisaTodos();
                                     OpemModal();
                                   }}
                                 >
@@ -15499,7 +15547,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
                                         }}
                                         className="th2 th-tabela-pedido nome-grupo "
                                       >
-                                        <h1>LISTA DE PRODUTOSs</h1>
+                                        <h1>LISTA DE PRODUTOS</h1>
                                       </th>
                                     </>
                                   ) : (
@@ -16796,7 +16844,7 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
         <Modal
           className="modal-confirm"
           show={showOperacao}
-          onHide={handleCloseOperacao}
+          onHide={handleCancelarOperacao}
           backdrop="static"
         >
           <Modal.Body>
@@ -16807,8 +16855,16 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
                 <ProgressBar className="progress" animated now={operacaoProgress} />
               )}
             </div>
-            {operacaoProgress >= 100 && (
-              <div className="">
+            <div className="">
+              {operacaoProgress < 100 ? (
+                <button
+                  style={{ width: 130, marginTop: 15 }}
+                  className="btn btn-secondary"
+                  onClick={handleCancelarOperacao}
+                >
+                  Cancelar
+                </button>
+              ) : (
                 <button
                   style={{ width: 130, marginTop: 15 }}
                   className="btn btn-primary"
@@ -16816,8 +16872,8 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
                 >
                   Ok
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </Modal.Body>
         </Modal>
         {/* ======================== MODAL DADOS NÃO ENCONTRADROS NO SANKHYA =========================== */}
@@ -16975,47 +17031,89 @@ WHERE PRO.CODPROD <> 0 AND PRO.USOPROD IN ('V','R')`;
             <h1>LISTA DE PEDIDOS</h1>
           </Modal.Header>
           <Modal.Body>
-            <div className="blocoLispesqPedidos">
-              <div className="divradio" onClick={PesquisaTodos}>
-                <input
-                  name="pesquisa"
-                  type="radio"
-                  checked={todos}
-                  onChange={PesquisaTodos}
-                />
-                <p style={{ marginLeft: 8 }}>Todos</p>
-              </div>
-              <div className="divradio" onClick={PesquisaEnviados}>
-                <input
-                  style={{ marginLeft: 20 }}
-                  name="pesquisa"
-                  type="radio"
-                  checked={enviados}
-                  onChange={PesquisaEnviados}
-                />
-                <p style={{ marginLeft: 8 }}>Enviados</p>
-              </div>
-              <div className="divradio" onClick={PesquisaPendentes}>
-                <input
-                  style={{ marginLeft: 20 }}
-                  name="pesquisa"
-                  type="radio"
-                  checked={pendentes}
-                  onChange={PesquisaPendentes}
-                />
-                <p style={{ marginLeft: 8 }}>À Processar</p>
-              </div>
-              <div className="divradio" onClick={PesquisaNEnviados}>
-                <input
-                  style={{ marginLeft: 20 }}
-                  name="pesquisa"
-                  type="radio"
-                  checked={nenviados}
-                  onChange={PesquisaNEnviados}
-                />
-                <p style={{ marginLeft: 8 }}>Á Enviar</p>
-              </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+              {isOnline && (
+                <button
+                  className={mobileListaTab === 'api' ? 'btn btn-primary' : 'btn btn-outline-primary'}
+                  onClick={async () => {
+                    setMobileListaTab('api');
+                    setPaginaList(1);
+                    paginaList = 1;
+                    settodos(true);
+                    setenviados(false);
+                    setpendentes(false);
+                    setnenviados(false);
+                    setPendenteErro(false);
+                    setSearchList('todos');
+                    searchList = 'todos';
+                    await GetListaCabecalho('api');
+                  }}
+                >
+                  Pedidos Sincronizados
+                </button>
+              )}
+              <button
+                className={(!isOnline || mobileListaTab === 'local') ? 'btn btn-primary' : 'btn btn-outline-primary'}
+                onClick={async () => {
+                  setMobileListaTab('local');
+                  setPaginaList(1);
+                  paginaList = 1;
+                  settodos(true);
+                  setenviados(false);
+                  setpendentes(false);
+                  setnenviados(false);
+                  setPendenteErro(false);
+                  setSearchList('todos');
+                  searchList = 'todos';
+                  await GetListaCabecalho('local');
+                }}
+              >
+                Pedidos Banco Local
+              </button>
             </div>
+            {isOnline && mobileListaTab === 'api' && (
+              <div className="blocoLispesqPedidos">
+                <div className="divradio" onClick={PesquisaTodos}>
+                  <input
+                    name="pesquisa"
+                    type="radio"
+                    checked={todos}
+                    onChange={PesquisaTodos}
+                  />
+                  <p style={{ marginLeft: 8 }}>Todos</p>
+                </div>
+                <div className="divradio" onClick={PesquisaEnviados}>
+                  <input
+                    style={{ marginLeft: 20 }}
+                    name="pesquisa"
+                    type="radio"
+                    checked={enviados}
+                    onChange={PesquisaEnviados}
+                  />
+                  <p style={{ marginLeft: 8 }}>Enviados</p>
+                </div>
+                <div className="divradio" onClick={PesquisaPendentes}>
+                  <input
+                    style={{ marginLeft: 20 }}
+                    name="pesquisa"
+                    type="radio"
+                    checked={pendentes}
+                    onChange={PesquisaPendentes}
+                  />
+                  <p style={{ marginLeft: 8 }}>À Processar</p>
+                </div>
+                <div className="divradio" onClick={PesquisaNEnviados}>
+                  <input
+                    style={{ marginLeft: 20 }}
+                    name="pesquisa"
+                    type="radio"
+                    checked={nenviados}
+                    onChange={PesquisaNEnviados}
+                  />
+                  <p style={{ marginLeft: 8 }}>Á Enviar</p>
+                </div>
+              </div>
+            )}
             <h1 className="h1Promotor"></h1>
             {isMobile ? <></> : <></>}
             <div className="table-responsive  tabela-responsiva-pedido-realizado">

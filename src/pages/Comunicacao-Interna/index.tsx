@@ -107,32 +107,15 @@ export default function ComunicacaoInterna() {
   }, [paginagr]);
 
   async function getComunicados() {
-    await api
-      .get('/api/Comunicado')
-      .then((response) => {
-        setLoading(false);
-        setComunicados(response.data);
-        comunicados = response.data;
-        console.log('comunicados', comunicados);
-      })
-      .catch((error) => {
-        console.log('Ocorreu um erro');
-      });
+    setLoading(false);
+    setComunicados([]);
+    comunicados = [];
   }
   async function GetListaComunicado() {
-    await api
-
-      .get(`/api/Comunicado/Lista?pagina=${pagina}&totalpagina=${qtdePagina}`)
-      .then((response) => {
-        setLoading(false);
-        setcomunicadosLista(response.data.data);
-        comunicadoLista = response.data.data;
-        setTotalPaginas(Math.ceil(response.data.total / qtdePagina));
-      })
-      .catch((error) => {
-        console.log('Ocorreu um erro');
-        setLoading(false);
-      });
+    setLoading(false);
+    setcomunicadosLista([]);
+    comunicadoLista = [];
+    setTotalPaginas(0);
   }
 
   async function CreateComunicado() {

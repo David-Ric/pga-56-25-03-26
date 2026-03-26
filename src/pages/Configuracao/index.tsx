@@ -47,7 +47,7 @@ export default function Configuracoes() {
   );
 
   const [showupdate, setShowupdate] = useState(false);
-  const [atualizarSistem, setatualizarSistem] = useState(false);
+  const [verificarEnvio, setVerificarEnvio] = useState(false);
   const handleCloseupdate = () => setShowupdate(false);
   const [fixo1, setFixo1] = useState(true);
   const [fixo2, setFixo2] = useState(true);
@@ -85,7 +85,7 @@ export default function Configuracoes() {
     window.scrollTo(0, 0);
     logado();
     GetapontamentoId();
-    VerificarAtualizacao();
+    CarregarVerificarEnvio();
   }, []);
 
   function logado() {
@@ -98,53 +98,67 @@ export default function Configuracoes() {
       history('/');
     }
   }
-  async function PararAtualizarSistema() {
-    await api
-      .delete('/api/Comunicado/1')
-      .then((response) => {
-        setatualizarSistem(false);
-        VerificarAtualizacao();
-      })
-      .catch((error) => {
-        setLoading(false);
-      });
-  }
-
-  async function AtualizarSistema() {
-    await api
-      .post('/api/Comunicado', {
+  async function AtivarVerificarEnvio() {
+    try {
+      const existing = await api.get('/api/Etiqueta/1');
+      await api.put('/api/Etiqueta/1', {
         id: 1,
-        titulo: 'Atualizar Sistema',
-        texto: 'Atualizando',
+        titulo: 'Verificar Envio',
+        nomeTxt: 'Verificar Envio',
+        sql: 'Verificar Envio',
+        zpl: 'Verificar Envio',
+        printerAddress: 'Verificar Envio',
+      });
+      setVerificarEnvio(true);
+    } catch {
+      try {
+        const form = new FormData();
+        form.append('Id', '1');
+        form.append('Titulo', 'Verificar Envio');
+        form.append('NomeTxt', 'Verificar Envio');
+        form.append('Sql', 'Verificar Envio');
+        form.append('Zpl', 'Verificar Envio');
+        form.append('PrinterAddress', 'Verificar Envio');
+        const pngBase64 =
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6Xb+QAAAABJRU5ErkJggg==';
+        const bytes = Uint8Array.from(atob(pngBase64), (c) =>
+          c.charCodeAt(0)
+        );
+        const blob = new Blob([bytes], { type: 'image/png' });
+        form.append(
+          'File',
+          new File([blob], 'verificar-envio.png', { type: 'image/png' })
+        );
+        await api.post('/api/Etiqueta', form, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        setVerificarEnvio(true);
+      } catch {
+        setLoading(false);
+      }
+    }
+  }
+
+  async function DesativarVerificarEnvio() {
+    await api
+      .delete('/api/Etiqueta/1')
+      .then(() => {
+        setVerificarEnvio(false);
       })
-      .then((response) => {
-        setatualizarSistem(true);
-        VerificarAtualizacao();
-      })
-      .catch((error) => {
+      .catch(() => {
         setLoading(false);
       });
   }
 
-  async function VerificarAtualizacao() {
-    await api
-      .get(`/api/Comunicado?pagina=1&totalpagina=999`)
-      .then((response) => {
-        const lista = Array.isArray(response?.data?.data)
-          ? response.data.data
-          : Array.isArray(response?.data)
-          ? response.data
-          : [];
-        console.log('verificar atualização', lista);
-        if (lista.length > 0) {
-          setatualizarSistem(true);
-        } else {
-          setatualizarSistem(false);
-        }
-      })
-      .catch((error) => {
-        console.log('erro de conexao');
-      });
+  async function CarregarVerificarEnvio() {
+    try {
+      const resp = await api.get('/api/Etiqueta/1');
+      const titulo = String((resp as any)?.data?.titulo ?? '').trim();
+      const nomeTxt = String((resp as any)?.data?.nomeTxt ?? '').trim();
+      setVerificarEnvio(titulo === 'Verificar Envio' && nomeTxt === 'Verificar Envio');
+    } catch {
+      setVerificarEnvio(false);
+    }
   }
 
   async function GetapontamentoId() {
@@ -502,41 +516,27 @@ export default function Configuracoes() {
                   </div>
                   <div className="divApontamento">
                     <div className="div-controles">
-                      <h1 className="title-input">Atualização do Sistema:</h1>
-                      {atualizarSistem ? (
-                        <>
-                          <div className="d-flex">
-                            <button
-                              style={{
-                                marginTop: 15,
-                                marginBottom: 15,
-                                marginLeft: 10,
-                              }}
-                              className="btn btn-danger"
-                              onClick={PararAtualizarSistema}
-                            >
-                              Parar Atualização
-                            </button>
-                            <h1 style={{ color: 'red' }}>
-                              Sistema atualizando...
-                            </h1>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            style={{
-                              marginTop: 15,
-                              marginBottom: 15,
-                              marginLeft: 10,
-                            }}
-                            className="btn btn-dark"
-                            onClick={AtualizarSistema}
-                          >
-                            Atualizar Sistema
-                          </button>
-                        </>
-                      )}
+                      <h1 className="title-input">Verificar Envio:</h1>
+                      <div
+                        className="d-flex"
+                        style={{ alignItems: 'center', marginTop: 15 }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={verificarEnvio}
+                          onChange={async (e) => {
+                            const checked = e.target.checked;
+                            if (checked) {
+                              await AtivarVerificarEnvio();
+                            } else {
+                              await DesativarVerificarEnvio();
+                            }
+                          }}
+                        />
+                        <h1 style={{ marginLeft: 10 }}>
+                          {verificarEnvio ? 'Ativo' : 'Inativo'}
+                        </h1>
+                      </div>
                     </div>
                   </div>
                 </div>

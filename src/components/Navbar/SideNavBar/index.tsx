@@ -923,27 +923,9 @@ export default function SideNavBar() {
   }, []);
 
   async function getComunicados() {
-    await api
-
-      .get(`/api/Comunicado`)
-      .then((response) => {
-        console.log('comunicados não lido', response.data);
-        const comunicadosNaoLidos = response.data.data.filter(
-          (comunicado: any) =>
-            !postLidos.some((post) => post.comunicadoId === comunicado.id)
-        );
-        setcomunicadosLista(comunicadosNaoLidos);
-        comunicadoLista = comunicadosNaoLidos;
-        console.log('comunicados não lidos', comunicadoLista);
-        if (comunicadoLista.length > 0) {
-          setShowComunicado(true);
-        } else {
-          setShowComunicado(false);
-        }
-      })
-      .catch((error) => {
-        console.log('Ocorreu um erro');
-      });
+    setcomunicadosLista([]);
+    comunicadoLista = [];
+    setShowComunicado(false);
   }
 
   const handleMarcarComLidos = async () => {

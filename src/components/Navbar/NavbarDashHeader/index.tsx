@@ -513,8 +513,6 @@ const NavbarDashHeader = () => {
         console.log('posts lidos', response.data.postLido);
         setPostLidos(response.data.postLido);
         postLidos = response.data.postLido;
-
-        getComunicados();
       })
       .catch((error) => {
         console.log('Ocorreu um erro');
@@ -522,27 +520,9 @@ const NavbarDashHeader = () => {
   }
 
   async function getComunicados() {
-    await api
-      .get('/api/Comunicado')
-      .then((response) => {
-        console.log('comunicados totais', response.data);
-        console.log('comunicados totais', response.data);
-        const comunicadosNaoLidos = response.data.filter(
-          (comunicado: any) =>
-            !postLidos.some((post) => post.comunicadoId === comunicado.id)
-        );
-        setComunicados(comunicadosNaoLidos);
-        comunicados = comunicadosNaoLidos;
-        console.log('comunicados não lidos', comunicados);
-        if (comunicados.length > 0) {
-          setShowDownL(true);
-        } else {
-          setShowDownL(false);
-        }
-      })
-      .catch((error) => {
-        console.log('Ocorreu um erro');
-      });
+    setComunicados([]);
+    comunicados = [];
+    setShowDownL(false);
   }
 
   const handleMarcarComLidos = async () => {
@@ -867,29 +847,10 @@ const NavbarDashHeader = () => {
   }
 
   async function VerificarAtualizacao() {
-    await api
-      .get(`/api/Comunicado`)
-      .then((response) => {
-        console.log('verificar atualização sistema', response.data);
-        const comunicados = response?.data ?? [];
-
-        if (comunicados.length > 0) {
-          localStorage.setItem('offline', 'true');
-          setIsOffline(true);
-        } else {
-          localStorage.setItem('offline', 'false');
-          if (isOnline) {
-            setIsOffline(false);
-          }
-        }
-      })
-      .catch((error) => {
-        console.log('erro ao verificar atualização sistema', error);
-        localStorage.setItem('offline', 'false');
-        if (isOnline) {
-          setIsOffline(false);
-        }
-      });
+    localStorage.setItem('offline', 'false');
+    if (isOnline) {
+      setIsOffline(false);
+    }
   }
 
   async function CheckDbVersion() {
